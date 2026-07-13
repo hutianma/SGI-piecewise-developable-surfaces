@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import colorsys
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -232,7 +234,74 @@ class Mesh:
         return normals
 
 
-def show_mesh(mesh: Mesh) -> None:
+def grow_flat_patch(
+    mesh: Mesh,
+    angle_defects: np.ndarray,
+    seed: int,
+    epsilon: float,
+) -> set[int]:
+    """Flood-fill the zero-curvature component containing ``seed``."""
+    if not 0 <= seed < len(mesh.vertices):
+        raise ValueError(
+            f"Seed {seed} is out of range; expected 0..{len(mesh.vertices) - 1}"
+        )
+    if epsilon < 0:
+        raise ValueError("Epsilon must be nonnegative")
+    if abs(angle_defects[seed]) > epsilon:
+        return set()
+
+    patch = {seed}
+    visited = {seed}
+    queue = deque([seed])
+
+    while queue:
+        current = queue.popleft()
+        for neighbor in mesh.vertices[current].vertex_indices:
+            if neighbor in visited:
+                continue
+            visited.add(neighbor)
+
+            if abs(angle_defects[neighbor]) <= epsilon:
+                patch.add(neighbor)
+                queue.append(neighbor)
+
+    return patch
+
+
+def find_all_flat_patches(
+    mesh: Mesh,
+    angle_defects: np.ndarray,
+    epsilon: float,
+    min_size: int = 1,
+) -> list[set[int]]:
+    """Return every connected component of near-zero-curvature vertices."""
+    if epsilon < 0:
+        raise ValueError("Epsilon must be nonnegative")
+    if min_size < 1:
+        raise ValueError("Minimum patch size must be at least 1")
+
+    assigned: set[int] = set()
+    patches: list[set[int]] = []
+    for vertex_index in range(len(mesh.vertices)):
+        if vertex_index in assigned or abs(angle_defects[vertex_index]) > epsilon:
+            continue
+
+        patch = grow_flat_patch(mesh, angle_defects, vertex_index, epsilon)
+        assigned.update(patch)
+        if len(patch) >= min_size:
+            patches.append(patch)
+
+    patches.sort(key=len, reverse=True)
+    return patches
+
+
+def show_mesh(
+    mesh: Mesh,
+    seed: int | None,
+    epsilon: float,
+    show_all_patches: bool,
+    min_patch_size: int,
+) -> None:
     curvature, angle_defects, boundary = mesh.gaussian_curvature()
     normals = mesh.vertex_normals()
     finite_abs_curvature = np.abs(curvature[np.isfinite(curvature)])
@@ -292,6 +361,55 @@ def show_mesh(mesh: Mesh) -> None:
         enabled=True,
     )
 
+    if seed is not None:
+        patch = grow_flat_patch(mesh, angle_defects, seed, epsilon)
+        patch_colors = np.full((len(mesh.vertices), 3), (0.65, 0.65, 0.65))
+        if patch:
+            patch_colors[list(patch)] = (1.0, 0.75, 0.0)
+        patch_colors[seed] = (1.0, 0.0, 1.0)
+        surface.add_color_quantity(
+            "Flat patch (yellow), seed (magenta)",
+            patch_colors,
+            defined_on="vertices",
+            enabled=True,
+        )
+
+        if patch:
+            print(
+                f"Flat patch from seed {seed}: {len(patch)} vertices "
+                f"(|angle defect| <= {epsilon:g})"
+            )
+        else:
+            print(
+                f"Seed {seed} was rejected: |angle defect|="
+                f"{abs(angle_defects[seed]):.6g} > epsilon={epsilon:g}"
+            )
+
+    if show_all_patches:
+        all_patches = find_all_flat_patches(mesh, angle_defects, epsilon)
+        patches = [
+            patch for patch in all_patches if len(patch) >= min_patch_size
+        ]
+        patch_colors = np.full((len(mesh.vertices), 3), (0.65, 0.65, 0.65))
+        for patch_index, patch in enumerate(patches):
+            hue = (patch_index * 0.61803398875) % 1.0
+            color = colorsys.hsv_to_rgb(hue, 0.75, 0.95)
+            patch_colors[list(patch)] = color
+
+        surface.add_color_quantity(
+            "All connected flat patches",
+            patch_colors,
+            defined_on="vertices",
+            enabled=True,
+        )
+        largest_sizes = [len(patch) for patch in patches[:10]]
+        print(f"Total connected flat patches: {len(all_patches)}")
+        print(
+            f"Displayed patches (size >= {min_patch_size}): {len(patches)} "
+            f"(epsilon={epsilon:g})"
+        )
+        print(f"Largest patch sizes: {largest_sizes}")
+
     interior = curvature[~boundary]
     if interior.size:
         print(
@@ -318,7 +436,32 @@ def main() -> None:
         default=original_model,
         help=f"OFF or OBJ mesh to display (default: {original_model})",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="vertex index from which to grow a connected flat patch",
+    )
+    parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=0.01,
+        help="maximum absolute angle defect for a flat vertex (default: 0.01 rad)",
+    )
+    parser.add_argument(
+        "--all-patches",
+        action="store_true",
+        help="find and color every connected flat patch",
+    )
+    parser.add_argument(
+        "--min-patch-size",
+        type=int,
+        default=10,
+        help="hide flat components smaller than this many vertices (default: 10)",
+    )
     args = parser.parse_args()
+    if args.seed is not None and args.all_patches:
+        parser.error("use either --seed or --all-patches, not both")
 
     mesh = Mesh.load(args.mesh)
     print(
@@ -339,7 +482,13 @@ def main() -> None:
             )
         print(f"Vertex {vertex_index} neighbors from edges: {neighbors_from_edges}")
 
-    show_mesh(mesh)
+    show_mesh(
+        mesh,
+        args.seed,
+        args.epsilon,
+        args.all_patches,
+        args.min_patch_size,
+    )
 
 
 if __name__ == "__main__":
