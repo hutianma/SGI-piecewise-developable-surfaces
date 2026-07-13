@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import polyscope as ps
+import trimesh
 
 
 @dataclass
@@ -39,6 +40,18 @@ class Mesh:
         self.triangles: list[Triangle] = []
 
     @classmethod
+    def load(cls, filename: str | Path) -> Mesh:
+        filename = Path(filename).expanduser()
+        suffix = filename.suffix.lower()
+        if suffix == ".off":
+            return cls.load_off(filename)
+        if suffix == ".obj":
+            return cls.load_obj(filename)
+        raise ValueError(
+            f"Unsupported mesh format '{suffix}'. Expected an .off or .obj file."
+        )
+
+    @classmethod
     def load_off(cls, filename: str | Path) -> Mesh:
         mesh = cls()
         tokens = cls._off_tokens(Path(filename))
@@ -70,6 +83,33 @@ class Mesh:
         except StopIteration as error:
             raise ValueError(f"Incomplete OFF file: {filename}") from error
 
+        return mesh
+
+    @classmethod
+    def load_obj(cls, filename: str | Path) -> Mesh:
+        loaded = trimesh.load_mesh(
+            Path(filename),
+            process=False,
+            maintain_order=True,
+        )
+
+        # An OBJ may contain several named objects. Combine them into one mesh,
+        # matching the single-mesh data structure used by the original demo.
+        if isinstance(loaded, trimesh.Scene):
+            if not loaded.geometry:
+                raise ValueError(f"OBJ file contains no mesh geometry: {filename}")
+            loaded = loaded.to_mesh()
+
+        if not isinstance(loaded, trimesh.Trimesh):
+            raise ValueError(f"Could not read a triangle mesh from: {filename}")
+
+        mesh = cls()
+        for x, y, z in np.asarray(loaded.vertices):
+            mesh.add_vertex(float(x), float(y), float(z))
+        for face in np.asarray(loaded.faces):
+            if len(face) != 3:
+                raise ValueError("OBJ contains a face which could not be triangulated")
+            mesh.add_triangle(int(face[0]), int(face[1]), int(face[2]))
         return mesh
 
     @staticmethod
@@ -137,17 +177,19 @@ def show_mesh(mesh: Mesh) -> None:
 
 def main() -> None:
     original_model = Path("/Users/huyufan/Downloads/MyDemo/0.off")
-    parser = argparse.ArgumentParser(description="Python/Polyscope port of MyDemo")
+    parser = argparse.ArgumentParser(
+        description="Python/Polyscope port of MyDemo (supports OFF and OBJ)"
+    )
     parser.add_argument(
         "mesh",
         nargs="?",
         type=Path,
         default=original_model,
-        help=f"OFF mesh to display (default: {original_model})",
+        help=f"OFF or OBJ mesh to display (default: {original_model})",
     )
     args = parser.parse_args()
 
-    mesh = Mesh.load_off(args.mesh)
+    mesh = Mesh.load(args.mesh)
     print(
         f"Loaded {len(mesh.vertices)} vertices, "
         f"{len(mesh.triangles)} triangles, and {len(mesh.edges)} edges"

@@ -1,6 +1,7 @@
 # Piecewise Developable Surfaces
 
-Python/Polyscope port of the original Coin3D `MyDemo` mesh viewer.
+Python/Polyscope port of the original Coin3D `MyDemo` mesh viewer. It supports
+OFF and OBJ triangle meshes.
 
 ## Setup
 
@@ -14,6 +15,7 @@ python -m pip install -r requirements.txt
 
 ```bash
 python mydemo_polyscope.py /path/to/mesh.off
+python mydemo_polyscope.py /path/to/mesh.obj
 ```
 
 If no mesh path is supplied, the script uses the original `MyDemo/0.off` path
