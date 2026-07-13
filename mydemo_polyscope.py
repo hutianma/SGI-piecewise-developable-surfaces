@@ -233,7 +233,7 @@ class Mesh:
 
 
 def show_mesh(mesh: Mesh) -> None:
-    curvature, _, boundary = mesh.gaussian_curvature()
+    curvature, angle_defects, boundary = mesh.gaussian_curvature()
     normals = mesh.vertex_normals()
     finite_abs_curvature = np.abs(curvature[np.isfinite(curvature)])
     color_limit = (
@@ -244,6 +244,15 @@ def show_mesh(mesh: Mesh) -> None:
     if color_limit <= np.finfo(float).eps:
         color_limit = 1.0
 
+    finite_abs_defect = np.abs(angle_defects[np.isfinite(angle_defects)])
+    defect_color_limit = (
+        float(np.percentile(finite_abs_defect, 98))
+        if finite_abs_defect.size
+        else 1.0
+    )
+    if defect_color_limit <= np.finfo(float).eps:
+        defect_color_limit = 1.0
+
     ps.init()
     surface = ps.register_surface_mesh(
         "0.off",
@@ -253,12 +262,22 @@ def show_mesh(mesh: Mesh) -> None:
     )
     surface.set_color((0.0, 1.0, 0.0))
     surface.add_scalar_quantity(
-        "Gaussian curvature K",
+        "Pointwise Gaussian curvature K",
         curvature,
         defined_on="vertices",
         datatype="symmetric",
         cmap="coolwarm",
         vminmax=(-color_limit, color_limit),
+        enabled=False,
+        onscreen_colorbar_enabled=True,
+    )
+    surface.add_scalar_quantity(
+        "Integrated Gaussian curvature (angle defect)",
+        angle_defects,
+        defined_on="vertices",
+        datatype="symmetric",
+        cmap="coolwarm",
+        vminmax=(-defect_color_limit, defect_color_limit),
         enabled=True,
         onscreen_colorbar_enabled=True,
     )
