@@ -20,3 +20,12 @@ python mydemo_polyscope.py /path/to/mesh.obj
 
 If no mesh path is supplied, the script uses the original `MyDemo/0.off` path
 on the development machine.
+
+The viewer displays per-vertex discrete Gaussian curvature using an angle-defect
+formula. The `coolwarm` color map shows zero as white, positive curvature as red,
+and negative curvature as blue.
+
+Area-weighted vertex normals are shown as short blue arrows at every vertex in
+the `Vertex normals` vector quantity, similar to the Geometry Collective
+discrete-curvatures-and-normals demo. This layer can be toggled from the
+Polyscope sidebar.

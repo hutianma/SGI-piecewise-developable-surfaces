@@ -89,7 +89,7 @@ class Mesh:
     def load_obj(cls, filename: str | Path) -> Mesh:
         loaded = trimesh.load_mesh(
             Path(filename),
-            process=False,
+            process=True,
             maintain_order=True,
         )
 
@@ -162,8 +162,88 @@ class Mesh:
             dtype=np.int32,
         )
 
+    def gaussian_curvature(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute vertex Gaussian curvature using angle defect / barycentric area."""
+        positions = self.vertex_array()
+        faces = self.triangle_array()
+        vertex_count = len(positions)
+        angle_sums = np.zeros(vertex_count)
+        dual_areas = np.zeros(vertex_count)
+        edge_face_counts: dict[tuple[int, int], int] = {}
+
+        for face in faces:
+            i, j, k = (int(face[0]), int(face[1]), int(face[2]))
+            p_i, p_j, p_k = positions[[i, j, k]]
+
+            twice_area = np.linalg.norm(np.cross(p_j - p_i, p_k - p_i))
+            if twice_area <= np.finfo(float).eps:
+                continue
+
+            face_area = 0.5 * twice_area
+            dual_areas[[i, j, k]] += face_area / 3.0
+
+            corners = ((i, p_j - p_i, p_k - p_i),
+                       (j, p_k - p_j, p_i - p_j),
+                       (k, p_i - p_k, p_j - p_k))
+            for vertex_index, u, v in corners:
+                # atan2 is more stable than arccos near angles 0 and pi.
+                angle_sums[vertex_index] += np.arctan2(
+                    np.linalg.norm(np.cross(u, v)), np.dot(u, v)
+                )
+
+            for a, b in ((i, j), (j, k), (k, i)):
+                edge = (min(a, b), max(a, b))
+                edge_face_counts[edge] = edge_face_counts.get(edge, 0) + 1
+
+        boundary = np.zeros(vertex_count, dtype=bool)
+        for (i, j), face_count in edge_face_counts.items():
+            if face_count == 1:
+                boundary[[i, j]] = True
+
+        active = dual_areas > np.finfo(float).eps
+        target_angles = np.where(boundary, np.pi, 2.0 * np.pi)
+        angle_defects = target_angles - angle_sums
+        angle_defects[~active] = 0.0
+        curvature = np.divide(
+            angle_defects,
+            dual_areas,
+            out=np.zeros_like(angle_defects),
+            where=dual_areas > np.finfo(float).eps,
+        )
+        return curvature, angle_defects, boundary
+
+    def vertex_normals(self) -> np.ndarray:
+        """Compute area-weighted unit normals at mesh vertices."""
+        positions = self.vertex_array()
+        normals = np.zeros_like(positions, dtype=float)
+
+        for i, j, k in self.triangle_array():
+            i, j, k = int(i), int(j), int(k)
+            face_normal = np.cross(
+                positions[j] - positions[i], positions[k] - positions[i]
+            )
+            # The cross product has magnitude 2A, so summing it gives an
+            # area-weighted average of the incident face normals.
+            normals[[i, j, k]] += face_normal
+
+        lengths = np.linalg.norm(normals, axis=1)
+        nonzero = lengths > np.finfo(float).eps
+        normals[nonzero] /= lengths[nonzero, np.newaxis]
+        return normals
+
 
 def show_mesh(mesh: Mesh) -> None:
+    curvature, _, boundary = mesh.gaussian_curvature()
+    normals = mesh.vertex_normals()
+    finite_abs_curvature = np.abs(curvature[np.isfinite(curvature)])
+    color_limit = (
+        float(np.percentile(finite_abs_curvature, 98))
+        if finite_abs_curvature.size
+        else 1.0
+    )
+    if color_limit <= np.finfo(float).eps:
+        color_limit = 1.0
+
     ps.init()
     surface = ps.register_surface_mesh(
         "0.off",
@@ -172,6 +252,38 @@ def show_mesh(mesh: Mesh) -> None:
         smooth_shade=True,
     )
     surface.set_color((0.0, 1.0, 0.0))
+    surface.add_scalar_quantity(
+        "Gaussian curvature K",
+        curvature,
+        defined_on="vertices",
+        datatype="symmetric",
+        cmap="coolwarm",
+        vminmax=(-color_limit, color_limit),
+        enabled=True,
+        onscreen_colorbar_enabled=True,
+    )
+    surface.add_vector_quantity(
+        "Vertex normals",
+        normals,
+        defined_on="vertices",
+        vectortype="standard",
+        color=(0.0, 0.0, 1.0),
+        length=0.008,
+        radius=0.00012,
+        enabled=True,
+    )
+
+    interior = curvature[~boundary]
+    if interior.size:
+        print(
+            "Interior Gaussian curvature: "
+            f"min={interior.min():.6g}, max={interior.max():.6g}, "
+            f"mean |K|={np.mean(np.abs(interior)):.6g}"
+        )
+    print(
+        f"Boundary vertices: {np.count_nonzero(boundary)}; "
+        f"color range: [{-color_limit:.6g}, {color_limit:.6g}]"
+    )
     ps.show()
 
 
