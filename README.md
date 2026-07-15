@@ -17,6 +17,7 @@ python -m pip install -r requirements.txt
 python mydemo_polyscope.py /path/to/mesh.off
 python mydemo_polyscope.py /path/to/mesh.obj
 python mydemo_polyscope.py /path/to/mesh.obj --seed 100 --epsilon 0.01
+python mydemo_polyscope.py /path/to/mesh.obj --seed-face 100 --epsilon 0.01
 python mydemo_polyscope.py /path/to/mesh.obj --all-patches --epsilon 0.01
 ```
 
@@ -36,12 +37,19 @@ Polyscope sidebar.
 
 ## Flat-patch flood fill
 
-Pass `--seed` to grow the connected component of vertices whose absolute angle
-defect is at most `--epsilon`. The resulting patch is yellow, the seed is
-magenta, and rejected/outside vertices are gray. A curved seed produces an
-empty patch. The default epsilon is 0.01 radians (about 0.57 degrees).
+Pass `--seed` to run the original vertex diagnostic: it grows through vertices
+whose absolute pointwise Gaussian curvature (`angle defect / vertex area`) is
+at most `--epsilon`. The resulting patch is
+yellow, the seed is magenta, and rejected/outside vertices are gray. The default
+epsilon is 0.01 in inverse model-length squared. The previous angle-defect
+stopping condition remains commented out in the source for comparison.
 
-Use `--all-patches` to traverse all near-zero-curvature vertices and assign a
-different color to every connected component. Components smaller than 10
-vertices are hidden by default; change this with `--min-patch-size`. The terminal
-reports both the total number of connected flat patches and the number displayed.
+Use `--seed-face` to grow a triangle patch. A candidate face is accepted only
+when every vertex it newly moves into the patch interior has finite pointwise
+Gaussian curvature with absolute value at most `--epsilon`. High-curvature
+vertices may remain on patch boundaries or seams, but not in patch interiors.
+
+Use `--all-patches` to greedily partition all triangles into edge-connected
+developable face patches. The next seed is the flattest unassigned face.
+Components smaller than 10 faces are hidden by default; change this with
+`--min-patch-size`. The terminal reports total and displayed patch counts.

@@ -25,6 +25,7 @@ class Edge:
     index: int
     vertex_1: int
     vertex_2: int
+    triangle_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -40,6 +41,7 @@ class Mesh:
         self.vertices: list[Vertex] = []
         self.edges: list[Edge] = []
         self.triangles: list[Triangle] = []
+        self._edge_lookup: dict[tuple[int, int], int] = {}
 
     @classmethod
     def load(cls, filename: str | Path) -> Mesh:
@@ -136,21 +138,44 @@ class Mesh:
         for vertex_index in (v1, v2, v3):
             self.vertices[vertex_index].triangle_indices.append(triangle_index)
 
-        self._connect_vertices(v1, v2)
-        self._connect_vertices(v1, v3)
-        self._connect_vertices(v2, v3)
+        self._connect_vertices(v1, v2, triangle_index)
+        self._connect_vertices(v1, v3, triangle_index)
+        self._connect_vertices(v2, v3, triangle_index)
 
-    def _connect_vertices(self, v1: int, v2: int) -> None:
-        if v2 in self.vertices[v1].vertex_indices:
+    def _connect_vertices(self, v1: int, v2: int, triangle_index: int) -> None:
+        key = (min(v1, v2), max(v1, v2))
+        existing_edge = self._edge_lookup.get(key)
+        if existing_edge is not None:
+            self.edges[existing_edge].triangle_indices.append(triangle_index)
             return
 
         self.vertices[v1].vertex_indices.append(v2)
         self.vertices[v2].vertex_indices.append(v1)
 
         edge_index = len(self.edges)
-        self.edges.append(Edge(edge_index, v1, v2))
+        self.edges.append(Edge(edge_index, v1, v2, [triangle_index]))
+        self._edge_lookup[key] = edge_index
         self.vertices[v1].edge_indices.append(edge_index)
         self.vertices[v2].edge_indices.append(edge_index)
+
+    def face_neighbors(self) -> list[set[int]]:
+        """Return edge-adjacent triangle indices for every triangle."""
+        neighbors = [set() for _ in self.triangles]
+        for edge in self.edges:
+            for face_index in edge.triangle_indices:
+                neighbors[face_index].update(
+                    other
+                    for other in edge.triangle_indices
+                    if other != face_index
+                )
+        return neighbors
+
+    def boundary_vertices(self) -> set[int]:
+        boundary: set[int] = set()
+        for edge in self.edges:
+            if len(edge.triangle_indices) == 1:
+                boundary.update((edge.vertex_1, edge.vertex_2))
+        return boundary
 
     def vertex_array(self) -> np.ndarray:
         return np.asarray([vertex.coordinates for vertex in self.vertices])
@@ -236,7 +261,7 @@ class Mesh:
 
 def grow_flat_patch(
     mesh: Mesh,
-    angle_defects: np.ndarray,
+    pointwise_curvature: np.ndarray,
     seed: int,
     epsilon: float,
 ) -> set[int]:
@@ -247,7 +272,12 @@ def grow_flat_patch(
         )
     if epsilon < 0:
         raise ValueError("Epsilon must be nonnegative")
-    if abs(angle_defects[seed]) > epsilon:
+    # Old stopping condition (integrated curvature / angle defect):
+    # if not np.isfinite(angle_defects[seed]) or abs(angle_defects[seed]) > epsilon:
+    if (
+        not np.isfinite(pointwise_curvature[seed])
+        or abs(pointwise_curvature[seed]) > epsilon
+    ):
         return set()
 
     patch = {seed}
@@ -261,16 +291,31 @@ def grow_flat_patch(
                 continue
             visited.add(neighbor)
 
-            if abs(angle_defects[neighbor]) <= epsilon:
+            # Old stopping condition:
+            # if (np.isfinite(angle_defects[neighbor])
+            #         and abs(angle_defects[neighbor]) <= epsilon):
+            if (
+                np.isfinite(pointwise_curvature[neighbor])
+                and abs(pointwise_curvature[neighbor]) <= epsilon
+            ):
                 patch.add(neighbor)
                 queue.append(neighbor)
 
     return patch
 
 
+def scale_normalized_curvature(mesh: Mesh, curvature: np.ndarray) -> np.ndarray:
+    """Make pointwise Gaussian curvature invariant to uniform model scaling."""
+    positions = mesh.vertex_array()
+    diagonal = float(np.linalg.norm(positions.max(axis=0) - positions.min(axis=0)))
+    if diagonal <= np.finfo(float).eps:
+        return np.full_like(curvature, np.nan)
+    return curvature * diagonal * diagonal
+
+
 def find_all_flat_patches(
     mesh: Mesh,
-    angle_defects: np.ndarray,
+    pointwise_curvature: np.ndarray,
     epsilon: float,
     min_size: int = 1,
 ) -> list[set[int]]:
@@ -283,10 +328,17 @@ def find_all_flat_patches(
     assigned: set[int] = set()
     patches: list[set[int]] = []
     for vertex_index in range(len(mesh.vertices)):
-        if vertex_index in assigned or abs(angle_defects[vertex_index]) > epsilon:
+        if (
+            vertex_index in assigned
+            # Old conditions:
+            # or not np.isfinite(angle_defects[vertex_index])
+            # or abs(angle_defects[vertex_index]) > epsilon
+            or not np.isfinite(pointwise_curvature[vertex_index])
+            or abs(pointwise_curvature[vertex_index]) > epsilon
+        ):
             continue
 
-        patch = grow_flat_patch(mesh, angle_defects, vertex_index, epsilon)
+        patch = grow_flat_patch(mesh, pointwise_curvature, vertex_index, epsilon)
         assigned.update(patch)
         if len(patch) >= min_size:
             patches.append(patch)
@@ -295,14 +347,146 @@ def find_all_flat_patches(
     return patches
 
 
+def grow_developable_face_patch(
+    mesh: Mesh,
+    pointwise_curvature: np.ndarray,
+    seed_face: int,
+    epsilon: float,
+    blocked_faces: set[int] | None = None,
+) -> set[int]:
+    """Grow faces without enclosing a high-curvature interior vertex."""
+    if not 0 <= seed_face < len(mesh.triangles):
+        raise ValueError(
+            f"Seed face {seed_face} is out of range; "
+            f"expected 0..{len(mesh.triangles) - 1}"
+        )
+    if epsilon < 0:
+        raise ValueError("Epsilon must be nonnegative")
+
+    blocked = blocked_faces or set()
+    if seed_face in blocked:
+        return set()
+
+    face_neighbors = mesh.face_neighbors()
+    mesh_boundary_vertices = mesh.boundary_vertices()
+    patch_faces = {seed_face}
+    interior_vertices: set[int] = set()
+    rejected_faces: set[int] = set()
+    queue = deque(face_neighbors[seed_face] - blocked)
+    queued_faces = set(queue)
+
+    while queue:
+        candidate = queue.popleft()
+        queued_faces.discard(candidate)
+        if (
+            candidate in patch_faces
+            or candidate in rejected_faces
+            or candidate in blocked
+        ):
+            continue
+
+        trial_patch = patch_faces | {candidate}
+        triangle = mesh.triangles[candidate]
+        candidate_vertices = (
+            triangle.vertex_1,
+            triangle.vertex_2,
+            triangle.vertex_3,
+        )
+        newly_created_interior = {
+            vertex_index
+            for vertex_index in candidate_vertices
+            if vertex_index not in interior_vertices
+            and vertex_index not in mesh_boundary_vertices
+            and set(mesh.vertices[vertex_index].triangle_indices).issubset(
+                trial_patch
+            )
+        }
+
+        # Old stopping condition used integrated curvature (angle defect):
+        # acceptable = all(
+        #     np.isfinite(angle_defects[vertex_index])
+        #     and abs(angle_defects[vertex_index]) <= epsilon
+        #     for vertex_index in newly_created_interior
+        # )
+        acceptable = all(
+            np.isfinite(pointwise_curvature[vertex_index])
+            and abs(pointwise_curvature[vertex_index]) <= epsilon
+            for vertex_index in newly_created_interior
+        )
+        if not acceptable:
+            rejected_faces.add(candidate)
+            continue
+
+        patch_faces.add(candidate)
+        interior_vertices.update(newly_created_interior)
+        for neighbor_face in face_neighbors[candidate]:
+            if (
+                neighbor_face not in patch_faces
+                and neighbor_face not in rejected_faces
+                and neighbor_face not in blocked
+                and neighbor_face not in queued_faces
+            ):
+                queue.append(neighbor_face)
+                queued_faces.add(neighbor_face)
+
+    return patch_faces
+
+
+def find_all_developable_face_patches(
+    mesh: Mesh,
+    pointwise_curvature: np.ndarray,
+    epsilon: float,
+) -> list[set[int]]:
+    """Greedily partition all triangles into developable face patches."""
+    if epsilon < 0:
+        raise ValueError("Epsilon must be nonnegative")
+
+    assigned_faces: set[int] = set()
+    patches: list[set[int]] = []
+    all_faces = set(range(len(mesh.triangles)))
+
+    while assigned_faces != all_faces:
+        unassigned = all_faces - assigned_faces
+
+        def seed_score(face_index: int) -> float:
+            triangle = mesh.triangles[face_index]
+            return max(
+                # Old seed score: abs(angle_defects[vertex_index])
+                abs(pointwise_curvature[vertex_index])
+                for vertex_index in (
+                    triangle.vertex_1,
+                    triangle.vertex_2,
+                    triangle.vertex_3,
+                )
+            )
+
+        seed_face = min(unassigned, key=lambda face: (seed_score(face), face))
+        patch = grow_developable_face_patch(
+            mesh,
+            pointwise_curvature,
+            seed_face,
+            epsilon,
+            blocked_faces=assigned_faces,
+        )
+        if not patch:
+            patch = {seed_face}
+        patches.append(patch)
+        assigned_faces.update(patch)
+
+    patches.sort(key=len, reverse=True)
+    return patches
+
+
 def show_mesh(
     mesh: Mesh,
     seed: int | None,
+    seed_face: int | None,
     epsilon: float,
     show_all_patches: bool,
     min_patch_size: int,
 ) -> None:
     curvature, angle_defects, boundary = mesh.gaussian_curvature()
+    normalized_curvature = scale_normalized_curvature(mesh, curvature)
     normals = mesh.vertex_normals()
     finite_abs_curvature = np.abs(curvature[np.isfinite(curvature)])
     color_limit = (
@@ -340,6 +524,26 @@ def show_mesh(
         enabled=False,
         onscreen_colorbar_enabled=True,
     )
+    finite_normalized = np.abs(
+        normalized_curvature[np.isfinite(normalized_curvature)]
+    )
+    normalized_limit = (
+        float(np.percentile(finite_normalized, 98))
+        if finite_normalized.size
+        else 1.0
+    )
+    if normalized_limit <= np.finfo(float).eps:
+        normalized_limit = 1.0
+    surface.add_scalar_quantity(
+        "Scale-normalized Gaussian curvature K L^2",
+        normalized_curvature,
+        defined_on="vertices",
+        datatype="symmetric",
+        cmap="coolwarm",
+        vminmax=(-normalized_limit, normalized_limit),
+        enabled=False,
+        onscreen_colorbar_enabled=True,
+    )
     surface.add_scalar_quantity(
         "Integrated Gaussian curvature (angle defect)",
         angle_defects,
@@ -362,7 +566,8 @@ def show_mesh(
     )
 
     if seed is not None:
-        patch = grow_flat_patch(mesh, angle_defects, seed, epsilon)
+        # Old call: grow_flat_patch(mesh, angle_defects, seed, epsilon)
+        patch = grow_flat_patch(mesh, curvature, seed, epsilon)
         patch_colors = np.full((len(mesh.vertices), 3), (0.65, 0.65, 0.65))
         if patch:
             patch_colors[list(patch)] = (1.0, 0.75, 0.0)
@@ -377,35 +582,53 @@ def show_mesh(
         if patch:
             print(
                 f"Flat patch from seed {seed}: {len(patch)} vertices "
-                f"(|angle defect| <= {epsilon:g})"
+                f"(|pointwise K| <= {epsilon:g})"
             )
         else:
             print(
-                f"Seed {seed} was rejected: |angle defect|="
-                f"{abs(angle_defects[seed]):.6g} > epsilon={epsilon:g}"
+                f"Seed {seed} was rejected: |pointwise K|="
+                f"{abs(curvature[seed]):.6g}, epsilon={epsilon:g}"
             )
 
+    if seed_face is not None:
+        # Old call used angle_defects instead of curvature.
+        face_patch = grow_developable_face_patch(mesh, curvature, seed_face, epsilon)
+        face_colors = np.full((len(mesh.triangles), 3), (0.65, 0.65, 0.65))
+        face_colors[list(face_patch)] = (1.0, 0.75, 0.0)
+        face_colors[seed_face] = (1.0, 0.0, 1.0)
+        surface.add_color_quantity(
+            "Developable face patch (yellow), seed face (magenta)",
+            face_colors,
+            defined_on="faces",
+            enabled=True,
+        )
+        print(
+            f"Developable patch from face {seed_face}: "
+            f"{len(face_patch)} faces (interior |pointwise K| <= {epsilon:g})"
+        )
+
     if show_all_patches:
-        all_patches = find_all_flat_patches(mesh, angle_defects, epsilon)
+        # Old call used angle_defects instead of curvature.
+        all_patches = find_all_developable_face_patches(mesh, curvature, epsilon)
         patches = [
             patch for patch in all_patches if len(patch) >= min_patch_size
         ]
-        patch_colors = np.full((len(mesh.vertices), 3), (0.65, 0.65, 0.65))
+        patch_colors = np.full((len(mesh.triangles), 3), (0.65, 0.65, 0.65))
         for patch_index, patch in enumerate(patches):
             hue = (patch_index * 0.61803398875) % 1.0
             color = colorsys.hsv_to_rgb(hue, 0.75, 0.95)
             patch_colors[list(patch)] = color
 
         surface.add_color_quantity(
-            "All connected flat patches",
+            "All developable face patches",
             patch_colors,
-            defined_on="vertices",
+            defined_on="faces",
             enabled=True,
         )
         largest_sizes = [len(patch) for patch in patches[:10]]
-        print(f"Total connected flat patches: {len(all_patches)}")
+        print(f"Total developable face patches: {len(all_patches)}")
         print(
-            f"Displayed patches (size >= {min_patch_size}): {len(patches)} "
+            f"Displayed patches (faces >= {min_patch_size}): {len(patches)} "
             f"(epsilon={epsilon:g})"
         )
         print(f"Largest patch sizes: {largest_sizes}")
@@ -443,25 +666,37 @@ def main() -> None:
         help="vertex index from which to grow a connected flat patch",
     )
     parser.add_argument(
+        "--seed-face",
+        type=int,
+        default=None,
+        help="triangle index from which to grow one developable face patch",
+    )
+    parser.add_argument(
         "--epsilon",
         type=float,
         default=0.01,
-        help="maximum absolute angle defect for a flat vertex (default: 0.01 rad)",
+        help=(
+            "maximum absolute pointwise Gaussian curvature "
+            "(angle defect / vertex area; default: 0.01)"
+        ),
     )
     parser.add_argument(
         "--all-patches",
         action="store_true",
-        help="find and color every connected flat patch",
+        help="partition and color all triangles as developable face patches",
     )
     parser.add_argument(
         "--min-patch-size",
         type=int,
         default=10,
-        help="hide flat components smaller than this many vertices (default: 10)",
+        help="hide face patches smaller than this many triangles (default: 10)",
     )
     args = parser.parse_args()
-    if args.seed is not None and args.all_patches:
-        parser.error("use either --seed or --all-patches, not both")
+    selected_modes = sum(
+        (args.seed is not None, args.seed_face is not None, args.all_patches)
+    )
+    if selected_modes > 1:
+        parser.error("use only one of --seed, --seed-face, or --all-patches")
 
     mesh = Mesh.load(args.mesh)
     print(
@@ -485,6 +720,7 @@ def main() -> None:
     show_mesh(
         mesh,
         args.seed,
+        args.seed_face,
         args.epsilon,
         args.all_patches,
         args.min_patch_size,
