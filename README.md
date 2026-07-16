@@ -69,13 +69,8 @@ input mesh:
 ```bash
 python optimize_angle_defect.py test-models/data/fandisk.obj \
   --epsilon 0.1 \
-  --output-dir results/fandisk_normal_optimization_epsilon_0.1
+  --output-dir results/fandisk/fandisk_comparison_package/methods/normal_joint_one_ring_shape_constrained_eps_0.1
 ```
-
-The original normal-displacement script is currently retained as a baseline,
-but its default `main()` call is commented out while the ray-search experiment
-is active. Re-enable the final two lines in `optimize_angle_defect.py` before
-rerunning this legacy baseline.
 
 The optimizer fixes the initial vertices with `|angle defect| > 1`, jointly
 moves moderate-defect vertices and their one-rings along frozen normals, and
@@ -101,10 +96,19 @@ python optimize_angle_defect_rays.py test-models/data/fandisk.obj \
   --rays 30 \
   --search-fraction 0.1 \
   --epsilon 0.1 \
-  --output-dir results/fandisk_ray_optimization_cone
+  --output-dir results/fandisk/fandisk_comparison_package/methods/double_cone_30_rays_geometry_safety_constrained_eps_0.1
 ```
 
-Use `--direction-mode sphere` for full Fibonacci-sphere direction sampling.
+Use the following command for full Fibonacci-sphere direction sampling:
+
+```bash
+python optimize_angle_defect_rays.py test-models/data/fandisk.obj \
+  --direction-mode sphere \
+  --rays 30 \
+  --search-fraction 0.1 \
+  --epsilon 0.1 \
+  --output-dir results/fandisk/fandisk_comparison_package/methods/virtual_sphere_30_rays_geometry_safety_constrained_eps_0.1
+```
 
 For a vertex patch grown with `--seed`, the viewer also marks candidate leakage
 edges in red. A candidate is an edge accepted by the zero-curvature BFS whose

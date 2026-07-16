@@ -1,0 +1,266 @@
+\documentclass[10pt]{article}
+\usepackage[left=0.85in,right=0.85in,top=0.65in,bottom=0.65in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,array}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\V}{\mathcal{V}}
+\newcommand{\E}{\mathcal{E}}
+\newcommand{\F}{\mathcal{F}}
+\newcommand{\B}{\mathcal{B}}
+\newcommand{\Sset}{\mathcal{S}}
+\newcommand{\A}{\mathcal{A}}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\eps}{\varepsilon}
+
+\title{Angle-Defect Reduction by Normal Displacement, Double-Cone Rays,
+and Virtual-Sphere Rays}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+\section{Problem and notation}
+
+Let a fixed-topology triangle mesh be
+$\mathcal{M}=(\V,\E,\F)$ with vertex positions
+$x_i\in\R^3$.  The integrated discrete Gaussian curvature is measured by
+the angle defect
+\begin{equation}
+\Omega_i(x)=
+\begin{cases}
+2\pi-\displaystyle\sum_{f\ni i}\theta_{if}(x), & i\notin\B,\\[2mm]
+\pi-\displaystyle\sum_{f\ni i}\theta_{if}(x), & i\in\B,
+\end{cases}
+\label{eq:defect}
+\end{equation}
+where $\B$ is the boundary-vertex set and $\theta_{if}$ is the corner angle
+of face $f$ at vertex $i$.  For a tolerance $\eps>0$, an interior vertex is
+classified as near-zero (yellow) when $|\Omega_i|\leq\eps$ and gray otherwise.
+
+An initial singular set is fixed once,
+\begin{equation}
+\Sset=\{i\in\V\setminus\B:|\Omega_i(x^0)|>\tau\},
+\qquad
+\A=\V\setminus(\B\cup\Sset),
+\end{equation}
+with $\tau=1$ radian in the current experiments.  Boundary and singular
+vertices are excluded from the threshold objective.  The principal curvature
+objective is
+\begin{equation}
+E_{\mathrm{thr}}(x)=
+\sum_{i\in\A}\left[\max(|\Omega_i(x)|-\eps,0)\right]^2.
+\label{eq:threshold-energy}
+\end{equation}
+The topology is unchanged, so the total angle defect is checked after every
+outer iteration as a Gauss--Bonnet consistency test.
+
+\section{Local curvature evaluation}
+
+Moving a set of vertices changes only triangles incident on that set and the
+angle defects of vertices of those triangles.  If $\mathcal{H}$ is a monitored
+vertex set, define
+\begin{equation}
+\F_{\mathcal H}=\{f\in\F:f\cap\mathcal H\neq\varnothing\}.
+\end{equation}
+Every face incident on a vertex in $\mathcal H$ belongs to
+$\F_{\mathcal H}$; consequently, recomputing corner angles only on
+$\F_{\mathcal H}$ gives the exact new defects for all vertices in
+$\mathcal H$.  This replaces repeated full-mesh evaluations inside an
+optimizer.  Full-mesh defects and geometry checks are still recomputed before
+accepting an outer update and at the end of each iteration.
+
+For a single-vertex ray candidate, only faces incident on vertex $i$ change.
+If $\Delta\theta_{jf}=\theta_{jf}(x)-\theta_{jf}(x')$, then
+\begin{equation}
+\Omega_j(x')=\Omega_j(x)+
+\sum_{\substack{f\ni i\\f\ni j}}\Delta\theta_{jf}.
+\label{eq:local-defect-update}
+\end{equation}
+Equation~\eqref{eq:local-defect-update} is used for the cone and sphere
+candidate evaluations.  Its numerical result agrees with a full recomputation
+to floating-point precision.
+
+\section{Method I: local-objective normal displacement}
+
+At outer iteration $k$, define the moderate-gray target set
+\begin{equation}
+\mathcal{G}^k=\{i\in\A:\eps<|\Omega_i(x^k)|\leq\tau\}.
+\end{equation}
+The movable set contains the targets and $r$ vertex rings,
+\begin{equation}
+\mathcal{M}^k=\N_r(\mathcal{G}^k)\setminus(\B\cup\Sset),
+\qquad
+\mathcal{H}^k=\N_1(\mathcal{M}^k).
+\end{equation}
+The current implementation uses $r=1$.  Vertex normals $n_i^k$ are frozen
+during one inner optimization, and each movable position is parameterized by
+one scalar:
+\begin{equation}
+x_i(\delta)=x_i^k+\delta_i n_i^k,
+\qquad i\in\mathcal{M}^k.
+\label{eq:normal-param}
+\end{equation}
+Let $\ell_i^k$ be the current average incident-edge length and $\ell_i^0$ its
+initial value.  The box bound combines a per-step and cumulative displacement
+budget:
+\begin{equation}
+|\delta_i|\leq
+\min\left(
+\alpha\ell_i^k,
+\beta\ell_i^0-\|x_i^k-x_i^0\|
+\right),
+\label{eq:normal-bound}
+\end{equation}
+where negative remaining budgets are clamped to zero.
+
+The inner objective is
+\begin{equation}
+E_{\mathrm{normal}}=
+E_\kappa+\lambda_0E_0+\lambda_sE_s+
+\lambda_pE_p+\lambda_lE_l+\lambda_eE_e.
+\label{eq:normal-objective}
+\end{equation}
+For monitored active vertices $\mathcal{H}_A=\mathcal{H}^k\cap\A$,
+\begin{align}
+E_\kappa &=\frac{1}{|\mathcal{H}_A|}
+\sum_{i\in\mathcal{H}_A}
+\left(\frac{\max(|\Omega_i|-\eps,0)}{\eps}\right)^2,\\
+E_0 &=\frac{1}{|\mathcal{H}_A|}
+\sum_{i\in\mathcal{H}_A}\left(\frac{\Omega_i}{\eps}\right)^2,\\
+E_s &=\frac{1}{|\mathcal{H}^k\cap\Sset|}
+\sum_{i\in\mathcal{H}^k\cap\Sset}
+\left(\frac{\Omega_i-\Omega_i^0}{\max(|\Omega_i^0|,\eps)}\right)^2,\\
+E_p &=\frac{1}{|\mathcal{M}^k|}
+\sum_{i\in\mathcal{M}^k}\left(\frac{\delta_i}{\ell_i^k}\right)^2.
+\end{align}
+Let $d_i=\delta_i n_i^k$ for movable vertices and $d_i=0$ otherwise.
+For the edges affected by $\mathcal{M}^k$,
+\begin{align}
+E_l &= \frac{1}{|\E_M|}\sum_{(i,j)\in\E_M}
+\frac{\|d_i-d_j\|^2}{[\tfrac12(\ell_i^k+\ell_j^k)]^2},\\
+E_e &= \frac{1}{|\E_M|}\sum_{(i,j)\in\E_M}
+\left(\frac{\|x_i(\delta)-x_j(\delta)\|-\|x_i^k-x_j^k\|}
+{\|x_i^k-x_j^k\|}\right)^2.
+\end{align}
+The current default weights are
+$\lambda_0=10^{-3}$, $\lambda_s=0.1$, $\lambda_p=0.01$,
+$\lambda_l=0.05$, and $\lambda_e=0.1$.
+
+The box-constrained problem is solved by L-BFGS-B.  The Bunny experiment uses
+five inner iterations per outer iteration.  Backtracking scales the proposed
+update by $2^{-q}$, $q=0,\ldots,10$.  An update is accepted only if the
+full-mesh $E_{\mathrm{thr}}$ decreases, all triangles pass the per-update
+orientation and area tests, affected edges pass the per-update distortion
+limit, cumulative vertex displacement satisfies~\eqref{eq:normal-bound}, the
+original-relative edge distortion is below $0.25$, the original-relative area
+ratio is above $0.30$, and all defects remain finite.
+
+\section{Method II: double-cone ray search}
+
+The ray methods update moderate-gray vertices sequentially in decreasing order
+of $|\Omega_i|$.  At vertex $i$, construct an orthonormal frame
+$(n_i,t_{i1},t_{i2})$.  For an outward-cone sample with azimuth $\phi_j$ and
+$c_j\in[\cos\vartheta,1]$, define
+\begin{equation}
+r_j^+=c_jn_i+\sqrt{1-c_j^2}
+(\cos\phi_j\,t_{i1}+\sin\phi_j\,t_{i2}),
+\qquad r_j^-=-r_j^+.
+\label{eq:cone-rays}
+\end{equation}
+The implementation samples $c_j$ uniformly over the spherical cap and uses a
+golden-angle sequence for $\phi_j$.  The retained experiment uses 30 total rays
+and cone half-angle $\vartheta=60^\circ$, corresponding to a full opening angle
+of $120^\circ$ for each cone.
+
+The search interval on every ray is
+\begin{equation}
+0\leq t\leq L_i,
+\qquad
+L_i=\min\left(\gamma\ell_i^k,
+\beta\ell_i^0-\|x_i^k-x_i^0\|\right),
+\label{eq:ray-bound}
+\end{equation}
+and a candidate is $x_i(t)=x_i^k+tr_j$.  The current parameters are
+$\gamma=0.1$ and $\beta=0.1$.  Five equally spaced coarse intervals are
+tested.  If two consecutive samples bracket a sign change of $\Omega_i(t)$,
+binary search refines the bracket for at most 12 steps or until
+$|\Omega_i|\leq10^{-5}$.
+
+Candidates are ranked by
+\begin{equation}
+E_{\mathrm{ray}}(x)=E_{\mathrm{thr}}(x)+\lambda_sE_s(x),
+\label{eq:ray-merit}
+\end{equation}
+using the exact local update in~\eqref{eq:local-defect-update}.  A candidate is
+accepted only if both $E_{\mathrm{ray}}$ and $E_{\mathrm{thr}}$ decrease and
+the incident triangles, incident edges, and cumulative vertex displacement
+pass the geometry-safety checks.  The same original-relative edge-distortion
+and area-ratio bounds used by the normal method are enforced.  A full defect
+computation is performed after each outer iteration.
+
+The cone construction is used only as a direction sampler.  The method does
+not compute the Shape Diameter Function and does not use a thickness value.
+
+\section{Method III: virtual-sphere ray search}
+
+The virtual-sphere method uses the same search interval, coarse sampling,
+binary search, merit function, sequential update, and safety checks as the
+double-cone method.  Only the direction set changes.  For $m$ rays and
+$j=0,\ldots,m-1$, Fibonacci-sphere directions are
+\begin{align}
+z_j &= 1-\frac{2(j+1/2)}{m},\\
+\phi_j &= j\pi(3-\sqrt5),\\
+r_j &= \left(\sqrt{1-z_j^2}\cos\phi_j,
+\sqrt{1-z_j^2}\sin\phi_j,z_j\right).
+\label{eq:sphere-rays}
+\end{align}
+Thus the virtual sphere samples unrestricted directions, including normal,
+tangential, and oblique motion.  The current experiment uses $m=30$.
+
+\section{Stanford Bunny results at \texorpdfstring{$\eps=0.1$}{epsilon=0.1}}
+
+The full-resolution mesh has 34,834 vertices, 69,451 triangles, 223 boundary
+vertices, and seven fixed initial singular vertices.  Boundary vertices are
+excluded from the reported interior-gray counts and threshold energy.
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+Method & Moderate gray & $E_{\mathrm{thr}}$ & Yellow BFS region & Max. edge change\\
+\midrule
+Original & 533 & 14.1534 & 34,136 & 0\%\\
+Local normal & \textbf{156} & \textbf{0.6757} & \textbf{34,518} & 24.71\%\\
+Double cone & 202 & 3.6586 & 34,471 & 19.14\%\\
+Virtual sphere & 213 & 3.7824 & 34,461 & 23.97\%\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The local normal method gives the strongest curvature reduction, but it also
+approaches the accumulated edge-distortion bound and reduces the minimum triangle
+quality from $0.01390$ to $0.00841$.  Its per-update orientation test does not
+guarantee that every final face normal remains aligned with the original face
+normal.  The cone and sphere methods preserve the original minimum triangle
+quality in this experiment; the cone produces fewer gray vertices, whereas the
+sphere retains a larger minimum triangle-area ratio ($0.594$ versus $0.313$).
+
+\section{Current limitations and required safeguards}
+
+All three methods now enforce an original-relative accumulated edge bound
+\begin{equation}
+\max_{(i,j)\in\E}
+\frac{\big|\|x_i-x_j\|-\|x_i^0-x_j^0\|\big|}{\|x_i^0-x_j^0\|}
+\leq\rho_{\mathrm{cum}},
+\end{equation}
+with $\rho_{\mathrm{cum}}=0.25$, together with an original-relative area-ratio
+bound $A_f/A_f^0\geq0.30$.  These guards control extreme accumulated changes.
+The final geometry comparison also reports RMS displacement, 95th-percentile
+affected-edge distortion, 5th-percentile affected-face area ratio, triangle
+quality, and face-normal deviation.  A future version may add triangle-quality
+and face-normal limits.  A curvature-transfer term should also penalize creating
+new gray vertices while correcting existing targets.
+
+\end{document}

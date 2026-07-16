@@ -108,7 +108,101 @@ def vertex_trial(
     return trial
 
 
+def corner_angles(triangles: np.ndarray) -> np.ndarray:
+    """Return the three interior angles for each triangle position triplet."""
+    result = np.empty((len(triangles), 3), dtype=float)
+    for corner, other_1, other_2 in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
+        u = triangles[:, other_1] - triangles[:, corner]
+        v = triangles[:, other_2] - triangles[:, corner]
+        result[:, corner] = np.arctan2(
+            np.linalg.norm(np.cross(u, v), axis=1),
+            np.einsum("ij,ij->i", u, v),
+        )
+    return result
+
+
+def local_trial_defects(
+    faces: np.ndarray,
+    incident_faces: np.ndarray,
+    positions: np.ndarray,
+    defects: np.ndarray,
+    vertex: int,
+    candidate_position: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Update only defects touched when one vertex changes position."""
+    local_faces = faces[incident_faces]
+    old_triangles = positions[local_faces]
+    new_triangles = old_triangles.copy()
+    new_triangles[local_faces == vertex] = candidate_position
+    angle_delta = corner_angles(old_triangles) - corner_angles(new_triangles)
+    affected = np.unique(local_faces)
+    local_defects = defects[affected].copy()
+    affected_lookup = {int(v): i for i, v in enumerate(affected)}
+    for face_vertices, face_delta in zip(local_faces, angle_delta):
+        for changed_vertex, delta in zip(face_vertices, face_delta):
+            local_defects[affected_lookup[int(changed_vertex)]] += delta
+    return affected, local_defects
+
+
+def local_vertex_normal(
+    faces: np.ndarray,
+    incident_faces: np.ndarray,
+    positions: np.ndarray,
+) -> np.ndarray:
+    triangles = positions[faces[incident_faces]]
+    normal = np.sum(
+        np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
+        axis=0,
+    )
+    length = np.linalg.norm(normal)
+    return normal / length if length > np.finfo(float).eps else np.zeros(3)
+
+
+def updated_energy(
+    current_energy: float,
+    defects: np.ndarray,
+    affected: np.ndarray,
+    local_defects: np.ndarray,
+    active: np.ndarray,
+    epsilon: float,
+) -> float:
+    mask = active[affected]
+    old_excess = np.maximum(np.abs(defects[affected][mask]) - epsilon, 0.0)
+    new_excess = np.maximum(np.abs(local_defects[mask]) - epsilon, 0.0)
+    return current_energy + float(np.sum(new_excess**2 - old_excess**2))
+
+
+def updated_singular_energy(
+    current_energy: float,
+    defects: np.ndarray,
+    initial_defects: np.ndarray,
+    affected: np.ndarray,
+    local_defects: np.ndarray,
+    singular: np.ndarray,
+    epsilon: float,
+) -> float:
+    mask = singular[affected]
+    if not np.any(mask):
+        return current_energy
+    denominator = np.maximum(np.abs(initial_defects[affected][mask]), epsilon)
+    old_residual = (
+        defects[affected][mask] - initial_defects[affected][mask]
+    ) / denominator
+    new_residual = (
+        local_defects[mask] - initial_defects[affected][mask]
+    ) / denominator
+    return current_energy + float(
+        np.sum(new_residual**2 - old_residual**2)
+        / max(1, np.count_nonzero(singular))
+    )
+
+
 def optimize(args: argparse.Namespace) -> None:
+    if args.output_dir is None:
+        method = "double_cone" if args.direction_mode == "cone" else "virtual_sphere"
+        args.output_dir = Path(
+            f"results/method_{method}_{args.rays}_rays_geometry_safety_constrained"
+        )
     mesh = Mesh.load(args.mesh)
     faces = mesh.triangle_array()
     edges = np.asarray([(edge.vertex_1, edge.vertex_2) for edge in mesh.edges])
@@ -121,9 +215,17 @@ def optimize(args: argparse.Namespace) -> None:
 
     initial_defects = angle_defects(faces, positions, boundary)
     initial_lengths = local_average_edge_lengths(len(positions), edges, positions)
+    original_edge_lengths = np.linalg.norm(
+        original[edges[:, 0]] - original[edges[:, 1]], axis=1
+    )
     singular = (~boundary) & (np.abs(initial_defects) > args.singular_threshold)
+    threshold_excluded = singular | boundary
     gauss_bonnet_target = float(np.sum(initial_defects))
     cumulative_limit = args.total_fraction * initial_lengths
+    vertex_faces = [
+        np.asarray(vertex.triangle_indices, dtype=int) for vertex in mesh.vertices
+    ]
+    vertex_edges = [np.asarray(vertex.edge_indices, dtype=int) for vertex in mesh.vertices]
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_vertex_report(
         args.output_dir / "singular_vertices.csv",
@@ -133,7 +235,9 @@ def optimize(args: argparse.Namespace) -> None:
     )
     write_vertex_report(
         args.output_dir / "initial_gray_vertices.csv",
-        np.flatnonzero((~singular) & (np.abs(initial_defects) > args.epsilon)),
+        np.flatnonzero(
+            (~singular) & (~boundary) & (np.abs(initial_defects) > args.epsilon)
+        ),
         original,
         initial_defects,
     )
@@ -157,7 +261,7 @@ def optimize(args: argparse.Namespace) -> None:
             print(f"Iteration {outer_iteration}: no moderate gray targets remain")
             break
 
-        energy_before = threshold_energy(defects, singular, args.epsilon)
+        energy_before = threshold_energy(defects, threshold_excluded, args.epsilon)
         gray_before = int(np.count_nonzero(gray))
         accepted_updates = 0
         sign_brackets = 0
@@ -165,11 +269,10 @@ def optimize(args: argparse.Namespace) -> None:
         max_step = 0.0
 
         for vertex in targets:
-            defects = angle_defects(faces, positions, boundary)
             if abs(defects[vertex]) <= args.epsilon or singular[vertex]:
                 continue
-            normals = vertex_normals(faces, positions)
-            normal = normals[vertex]
+            incident_faces = vertex_faces[vertex]
+            normal = local_vertex_normal(faces, incident_faces, positions)
             if np.linalg.norm(normal) <= np.finfo(float).eps:
                 continue
             if args.direction_mode == "cone":
@@ -179,8 +282,17 @@ def optimize(args: argparse.Namespace) -> None:
             else:
                 directions = sphere_directions(args.rays)
 
-            current_lengths = local_average_edge_lengths(len(positions), edges, positions)
-            search_radius = args.search_fraction * current_lengths[vertex]
+            incident_edges = vertex_edges[vertex]
+            local_edges = edges[incident_edges]
+            current_local_length = float(
+                np.mean(
+                    np.linalg.norm(
+                        positions[local_edges[:, 0]] - positions[local_edges[:, 1]],
+                        axis=1,
+                    )
+                )
+            )
+            search_radius = args.search_fraction * current_local_length
             remaining = max(
                 0.0,
                 cumulative_limit[vertex]
@@ -190,46 +302,52 @@ def optimize(args: argparse.Namespace) -> None:
             if search_limit <= np.finfo(float).eps:
                 continue
 
-            current_merit = merit(
-                defects,
-                initial_defects,
-                singular,
-                args.epsilon,
-                args.singular_weight,
+            current_threshold = threshold_energy(
+                defects, threshold_excluded, args.epsilon
             )
+            current_singular = singular_energy(
+                defects, initial_defects, singular, args.epsilon
+            )
+            current_merit = current_threshold + args.singular_weight * current_singular
             best_merit = current_merit
-            best_positions = None
-            best_defects = None
+            best_position = None
+            best_affected = None
+            best_local_defects = None
+            best_threshold = current_threshold
             best_distance = 0.0
 
             for direction in directions:
-                samples: list[tuple[float, float, float, np.ndarray, np.ndarray]] = []
+                samples: list[tuple[float, float]] = []
                 for distance in np.linspace(
                     0.0, search_limit, args.coarse_samples + 1
                 ):
-                    trial = vertex_trial(positions, vertex, direction, float(distance))
-                    trial_defects = angle_defects(faces, trial, boundary)
-                    trial_merit = merit(
-                        trial_defects,
-                        initial_defects,
-                        singular,
+                    candidate_position = positions[vertex] + float(distance) * direction
+                    affected, local_defects = local_trial_defects(
+                        faces, incident_faces, positions, defects, vertex, candidate_position
+                    )
+                    trial_threshold = updated_energy(
+                        current_threshold,
+                        defects,
+                        affected,
+                        local_defects,
+                        ~threshold_excluded,
                         args.epsilon,
-                        args.singular_weight,
                     )
-                    samples.append(
-                        (
-                            float(distance),
-                            float(trial_defects[vertex]),
-                            trial_merit,
-                            trial,
-                            trial_defects,
-                        )
+                    trial_singular = updated_singular_energy(
+                        current_singular, defects, initial_defects, affected,
+                        local_defects, singular, args.epsilon
                     )
+                    trial_merit = trial_threshold + args.singular_weight * trial_singular
+                    local_vertex_index = int(np.flatnonzero(affected == vertex)[0])
+                    trial_vertex_defect = float(local_defects[local_vertex_index])
+                    samples.append((float(distance), trial_vertex_defect))
                     tested_candidates += 1
                     if trial_merit < best_merit:
                         best_merit = trial_merit
-                        best_positions = trial
-                        best_defects = trial_defects
+                        best_position = candidate_position
+                        best_affected = affected
+                        best_local_defects = local_defects
+                        best_threshold = trial_threshold
                         best_distance = float(distance)
 
                 for left, right in zip(samples[:-1], samples[1:]):
@@ -240,24 +358,30 @@ def optimize(args: argparse.Namespace) -> None:
                     high_distance, high_defect = right[0], right[1]
                     for _ in range(args.binary_steps):
                         mid_distance = 0.5 * (low_distance + high_distance)
-                        trial = vertex_trial(
-                            positions, vertex, direction, mid_distance
+                        candidate_position = positions[vertex] + mid_distance * direction
+                        affected, local_defects = local_trial_defects(
+                            faces, incident_faces, positions, defects, vertex, candidate_position
                         )
-                        trial_defects = angle_defects(faces, trial, boundary)
-                        trial_merit = merit(
-                            trial_defects,
-                            initial_defects,
-                            singular,
-                            args.epsilon,
-                            args.singular_weight,
+                        trial_threshold = updated_energy(
+                            current_threshold, defects, affected, local_defects,
+                            ~threshold_excluded, args.epsilon
+                        )
+                        trial_singular = updated_singular_energy(
+                            current_singular, defects, initial_defects, affected,
+                            local_defects, singular, args.epsilon
+                        )
+                        trial_merit = (
+                            trial_threshold + args.singular_weight * trial_singular
                         )
                         tested_candidates += 1
                         if trial_merit < best_merit:
                             best_merit = trial_merit
-                            best_positions = trial
-                            best_defects = trial_defects
+                            best_position = candidate_position
+                            best_affected = affected
+                            best_local_defects = local_defects
+                            best_threshold = trial_threshold
                             best_distance = mid_distance
-                        mid_defect = float(trial_defects[vertex])
+                        mid_defect = float(local_defects[np.flatnonzero(affected == vertex)[0]])
                         if abs(mid_defect) <= args.root_tolerance:
                             break
                         if low_defect * mid_defect <= 0.0:
@@ -265,19 +389,32 @@ def optimize(args: argparse.Namespace) -> None:
                         else:
                             low_distance, low_defect = mid_distance, mid_defect
 
-            if best_positions is None or best_defects is None:
+            if best_position is None or best_affected is None or best_local_defects is None:
                 continue
+            best_positions = positions.copy()
+            best_positions[vertex] = best_position
             orientation_ok, area_ratio, _ = triangle_metrics(
-                faces, positions, best_positions
+                faces[incident_faces], positions, best_positions
+            )
+            _, original_area_ratio, _ = triangle_metrics(
+                faces[incident_faces], original, best_positions
             )
             old_edge_lengths = np.linalg.norm(
-                positions[edges[:, 0]] - positions[edges[:, 1]], axis=1
+                positions[local_edges[:, 0]] - positions[local_edges[:, 1]], axis=1
             )
             new_edge_lengths = np.linalg.norm(
-                best_positions[edges[:, 0]] - best_positions[edges[:, 1]], axis=1
+                best_positions[local_edges[:, 0]] - best_positions[local_edges[:, 1]], axis=1
             )
             edge_distortion = float(
                 np.max(np.abs(new_edge_lengths - old_edge_lengths) / old_edge_lengths)
+            )
+            cumulative_edge_distortion = float(
+                np.max(
+                    np.abs(
+                        new_edge_lengths - original_edge_lengths[incident_edges]
+                    )
+                    / original_edge_lengths[incident_edges]
+                )
             )
             cumulative_ok = bool(
                 np.linalg.norm(best_positions[vertex] - original[vertex])
@@ -285,20 +422,27 @@ def optimize(args: argparse.Namespace) -> None:
             )
             if (
                 best_merit < current_merit - args.minimum_improvement
-                and threshold_energy(best_defects, singular, args.epsilon)
-                < threshold_energy(defects, singular, args.epsilon) - args.minimum_improvement
+                and best_threshold < current_threshold - args.minimum_improvement
                 and orientation_ok
                 and area_ratio > args.min_area_ratio
                 and edge_distortion < args.max_edge_distortion
+                and original_area_ratio > args.min_original_area_ratio
+                and cumulative_edge_distortion
+                < args.max_cumulative_edge_distortion
                 and cumulative_ok
             ):
                 positions = best_positions
+                defects[best_affected] = best_local_defects
                 accepted_updates += 1
                 max_step = max(max_step, best_distance)
 
         final_defects = angle_defects(faces, positions, boundary)
-        final_gray = (~singular) & (np.abs(final_defects) > args.epsilon)
-        energy_after = threshold_energy(final_defects, singular, args.epsilon)
+        final_gray = (
+            (~singular) & (~boundary) & (np.abs(final_defects) > args.epsilon)
+        )
+        energy_after = threshold_energy(
+            final_defects, threshold_excluded, args.epsilon
+        )
         gauss_sum = float(np.sum(final_defects))
         row = {
             "iteration": outer_iteration,
@@ -330,7 +474,7 @@ def optimize(args: argparse.Namespace) -> None:
 
     final_defects = angle_defects(faces, positions, boundary)
     final_gray_vertices = np.flatnonzero(
-        (~singular) & (np.abs(final_defects) > args.epsilon)
+        (~singular) & (~boundary) & (np.abs(final_defects) > args.epsilon)
     )
     write_vertex_report(
         args.output_dir / "final_gray_vertices.csv",
@@ -370,9 +514,7 @@ def main() -> None:
         description="Angle-defect vertex updates by ray sampling and binary search"
     )
     parser.add_argument("mesh", type=Path)
-    parser.add_argument(
-        "--output-dir", type=Path, default=Path("results/fandisk_ray_optimization")
-    )
+    parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--epsilon", type=float, default=0.1)
     parser.add_argument("--singular-threshold", type=float, default=1.0)
     parser.add_argument("--direction-mode", choices=("cone", "sphere"), default="cone")
@@ -392,6 +534,10 @@ def main() -> None:
     parser.add_argument("--singular-weight", type=float, default=0.1)
     parser.add_argument("--min-area-ratio", type=float, default=0.2)
     parser.add_argument("--max-edge-distortion", type=float, default=0.1)
+    parser.add_argument("--min-original-area-ratio", type=float, default=0.3)
+    parser.add_argument(
+        "--max-cumulative-edge-distortion", type=float, default=0.25
+    )
     parser.add_argument("--minimum-improvement", type=float, default=1e-12)
     optimize(parser.parse_args())
 

@@ -132,7 +132,11 @@ def optimize(args: argparse.Namespace) -> None:
 
     initial_defects = angle_defects(faces, positions, boundary)
     initial_lengths = local_average_edge_lengths(len(positions), edges, positions)
+    original_edge_lengths = np.linalg.norm(
+        original[edges[:, 0]] - original[edges[:, 1]], axis=1
+    )
     singular = (~boundary) & (np.abs(initial_defects) > args.singular_threshold)
+    energy_excluded = singular | boundary
     target_gauss_bonnet = float(np.sum(initial_defects))
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -142,7 +146,9 @@ def optimize(args: argparse.Namespace) -> None:
         original,
         initial_defects,
     )
-    initial_gray = np.flatnonzero((~singular) & (np.abs(initial_defects) > args.epsilon))
+    initial_gray = np.flatnonzero(
+        (~singular) & (~boundary) & (np.abs(initial_defects) > args.epsilon)
+    )
     write_vertex_report(
         args.output_dir / "initial_gray_vertices.csv",
         initial_gray,
@@ -167,7 +173,7 @@ def optimize(args: argparse.Namespace) -> None:
             & (np.abs(defects) > args.epsilon)
             & (np.abs(defects) <= args.singular_threshold)
         )
-        gray = (~singular) & (np.abs(defects) > args.epsilon)
+        gray = (~singular) & (~boundary) & (np.abs(defects) > args.epsilon)
         gray_count = int(np.count_nonzero(gray))
         if not np.any(target):
             print(f"Iteration {iteration}: no moderate-defect targets remain")
@@ -185,12 +191,15 @@ def optimize(args: argparse.Namespace) -> None:
         monitored_singular = monitored[singular[monitored]]
         movable_lookup = np.full(len(positions), -1, dtype=int)
         movable_lookup[movable] = np.arange(len(movable))
+        local_face_mask = np.any(np.isin(faces, monitored), axis=1)
+        local_faces = faces[local_face_mask]
 
         normals = vertex_normals(faces, positions)
         local_lengths = local_average_edge_lengths(len(positions), edges, positions)
         step_bounds = args.step_fraction * local_lengths[movable]
+        cumulative_bounds = args.total_fraction * initial_lengths[movable]
         remaining = np.maximum(
-            args.total_fraction * initial_lengths[movable]
+            cumulative_bounds
             - np.linalg.norm(positions[movable] - original[movable], axis=1),
             0.0,
         )
@@ -198,6 +207,7 @@ def optimize(args: argparse.Namespace) -> None:
         bounds = [(-bound, bound) for bound in bounds_magnitude]
 
         affected_edge_mask = np.isin(edges[:, 0], movable) | np.isin(edges[:, 1], movable)
+        affected_edge_indices = np.flatnonzero(affected_edge_mask)
         affected_edges = edges[affected_edge_mask]
         old_edge_lengths = np.linalg.norm(
             positions[affected_edges[:, 0]] - positions[affected_edges[:, 1]], axis=1
@@ -216,7 +226,9 @@ def optimize(args: argparse.Namespace) -> None:
 
         def objective(displacements: np.ndarray) -> float:
             candidate = candidate_positions(displacements)
-            candidate_defects = angle_defects(faces, candidate, boundary)
+            # Every face incident on a monitored vertex is included, so these
+            # monitored defects are exact without traversing the full mesh.
+            candidate_defects = angle_defects(local_faces, candidate, boundary)
             excess = np.maximum(
                 np.abs(candidate_defects[monitored_non_singular]) - args.epsilon,
                 0.0,
@@ -258,13 +270,13 @@ def optimize(args: argparse.Namespace) -> None:
             return (
                 e_k
                 + args.zero_curvature_weight * e_0
-                + 0.1 * e_s
-                + 0.01 * e_p
-                + 0.05 * e_l
-                + 0.1 * e_e
+                + args.singular_weight * e_s
+                + args.position_weight * e_p
+                + args.smoothness_weight * e_l
+                + args.edge_weight * e_e
             )
 
-        old_global = global_energy(defects, singular, args.epsilon)
+        old_global = global_energy(defects, energy_excluded, args.epsilon)
         result = minimize(
             objective,
             np.zeros(len(movable)),
@@ -285,18 +297,29 @@ def optimize(args: argparse.Namespace) -> None:
             trial_displacements = scale * result.x
             trial = candidate_positions(trial_displacements)
             trial_defects = angle_defects(faces, trial, boundary)
-            new_global = global_energy(trial_defects, singular, args.epsilon)
+            new_global = global_energy(
+                trial_defects, energy_excluded, args.epsilon
+            )
             orientation_ok, area_ratio, quality = triangle_metrics(faces, positions, trial)
+            _, original_area_ratio, _ = triangle_metrics(faces, original, trial)
             new_lengths = np.linalg.norm(
                 trial[affected_edges[:, 0]] - trial[affected_edges[:, 1]], axis=1
             )
             edge_distortion = float(
                 np.max(np.abs(new_lengths - old_edge_lengths) / old_edge_lengths)
             )
+            cumulative_edge_distortion = float(
+                np.max(
+                    np.abs(
+                        new_lengths - original_edge_lengths[affected_edge_indices]
+                    )
+                    / original_edge_lengths[affected_edge_indices]
+                )
+            )
             cumulative_ok = bool(
                 np.all(
                     np.linalg.norm(trial[movable] - original[movable], axis=1)
-                    <= args.total_fraction * initial_lengths[movable] + 1e-12
+                    <= cumulative_bounds + 1e-12
                 )
             )
             if (
@@ -304,6 +327,9 @@ def optimize(args: argparse.Namespace) -> None:
                 and orientation_ok
                 and area_ratio > args.min_area_ratio
                 and edge_distortion < args.max_edge_distortion
+                and original_area_ratio > args.min_original_area_ratio
+                and cumulative_edge_distortion
+                < args.max_cumulative_edge_distortion
                 and cumulative_ok
                 and np.all(np.isfinite(trial_defects))
             ):
@@ -317,9 +343,15 @@ def optimize(args: argparse.Namespace) -> None:
                 break
 
         new_gray_count = int(
-            np.count_nonzero((~singular) & (np.abs(accepted_defects) > args.epsilon))
+            np.count_nonzero(
+                (~singular)
+                & (~boundary)
+                & (np.abs(accepted_defects) > args.epsilon)
+            )
         )
-        final_gray_mask = (~singular) & (np.abs(accepted_defects) > args.epsilon)
+        final_gray_mask = (
+            (~singular) & (~boundary) & (np.abs(accepted_defects) > args.epsilon)
+        )
         local_non_singular = monitored[~singular[monitored]]
         singular_change = accepted_defects[singular] - initial_defects[singular]
         max_step = float(
@@ -341,17 +373,20 @@ def optimize(args: argparse.Namespace) -> None:
             ),
             "movable_count": len(movable),
             "monitored_count": len(monitored),
+            "local_face_count": len(local_faces),
             "global_energy_before": old_global,
-            "global_energy_after": global_energy(accepted_defects, singular, args.epsilon),
+            "global_energy_after": global_energy(
+                accepted_defects, energy_excluded, args.epsilon
+            ),
             "local_zero_energy": float(
                 np.sum(accepted_defects[local_non_singular] ** 2)
             ),
             "global_zero_energy": float(
-                np.sum(accepted_defects[~singular] ** 2)
+                np.sum(accepted_defects[~energy_excluded] ** 2)
             ),
             "singular_preservation_energy": float(np.sum(singular_change**2)),
             "max_abs_defect_outside_singular": float(
-                np.max(np.abs(accepted_defects[~singular]))
+                np.max(np.abs(accepted_defects[~energy_excluded]))
             ),
             "max_step": max_step,
             "max_cumulative_displacement": float(
@@ -393,7 +428,9 @@ def optimize(args: argparse.Namespace) -> None:
             writer = csv.DictWriter(report_file, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
-    final_gray = np.flatnonzero((~singular) & (np.abs(final_defects) > args.epsilon))
+    final_gray = np.flatnonzero(
+        (~singular) & (~boundary) & (np.abs(final_defects) > args.epsilon)
+    )
     write_vertex_report(
         args.output_dir / "final_gray_vertices.csv", final_gray, positions, final_defects
     )
@@ -421,7 +458,11 @@ def main() -> None:
         description="Normal-displacement optimization of angle defect"
     )
     parser.add_argument("mesh", type=Path)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/normal_optimization"))
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("results/method_normal_joint_one_ring_shape_constrained"),
+    )
     parser.add_argument("--epsilon", type=float, default=0.1)
     parser.add_argument("--singular-threshold", type=float, default=1.0)
     parser.add_argument("--max-iterations", type=int, default=20)
@@ -430,6 +471,14 @@ def main() -> None:
     parser.add_argument("--total-fraction", type=float, default=0.1)
     parser.add_argument("--min-area-ratio", type=float, default=0.2)
     parser.add_argument("--max-edge-distortion", type=float, default=0.1)
+    parser.add_argument("--min-original-area-ratio", type=float, default=0.3)
+    parser.add_argument(
+        "--max-cumulative-edge-distortion", type=float, default=0.25
+    )
+    parser.add_argument("--singular-weight", type=float, default=0.1)
+    parser.add_argument("--position-weight", type=float, default=0.01)
+    parser.add_argument("--smoothness-weight", type=float, default=0.05)
+    parser.add_argument("--edge-weight", type=float, default=0.1)
     parser.add_argument(
         "--movable-rings",
         type=int,
@@ -446,9 +495,5 @@ def main() -> None:
     optimize(parser.parse_args())
 
 
-# The original normal-displacement optimizer is retained as an experimental
-# baseline, but its default command-line entry point is disabled while the
-# ray-search update proposed in the next experiment is being developed.
-#
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    main()

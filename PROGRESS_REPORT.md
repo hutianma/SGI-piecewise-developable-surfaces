@@ -300,12 +300,7 @@ angle-defect energy can be reduced safely under controlled deformation.
    true geometric corners, discretization artifacts, or optimization
    singularities.
 
-7. **Role of Shape Diameter Function.** SDF does not directly provide a
-   curvature-reducing direction. Its most defensible role is to restrict
-   displacement according to local thickness after an effective movement model
-   has been identified.
-
-8. **Definition of a developable patch.** Connected zero Gaussian curvature
+7. **Definition of a developable patch.** Connected zero Gaussian curvature
    alone may merge visually different developable regions. Conversely, sharp
    dihedral seams are extrinsic features rather than intrinsic developability
    criteria. The desired patch-coherence definition needs to be clarified.
