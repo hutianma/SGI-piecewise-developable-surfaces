@@ -1,7 +1,14 @@
 .venv/
 __pycache__/
+test-models/
 *.py[cod]
 .DS_Store
+.Rhistory
 .polyscope.ini
 imgui.ini
-
+screenshot_*.png
+screenshot_*.jpg
+results/**/.DS_Store
+results/**/*.aux
+results/**/*.log
+results/**/*.out
