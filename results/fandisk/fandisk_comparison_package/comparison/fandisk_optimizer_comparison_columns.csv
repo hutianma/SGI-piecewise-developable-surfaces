@@ -1,0 +1,14 @@
+column,notation,definition,unit_or_range,better_direction
+method,,Optimization method or the undeformed original mesh,text,N/A
+moderate_gray,# {i not in S_0 : |Omega_i| > epsilon},Number of non-singular vertices whose absolute angle defect exceeds epsilon,count,lower
+total_gray,moderate_gray + |S_0|,Total displayed gray count including the fixed singular candidates,count,lower
+original_gray_became_yellow,# {i : gray initially and |Omega_i'| <= epsilon},Initially moderate-gray vertices that satisfy the yellow threshold after optimization,count,higher
+original_yellow_became_gray,# {i : yellow initially and |Omega_i'| > epsilon},Initially yellow non-singular vertices that become gray after optimization; this measures curvature transfer,count,lower
+threshold_energy,sum_(i not in S_0) max(|Omega_i|-epsilon;0)^2,Squared amount by which non-singular angle defects exceed the yellow threshold,radians^2,lower
+global_zero_energy,sum_(i not in S_0) Omega_i^2,Total squared angle defect over every non-singular vertex including already-yellow vertices,radians^2,lower
+max_displacement,max_i ||x_i'-x_i^0||,Largest Euclidean vertex displacement from the original mesh,model length,lower subject to curvature improvement
+mean_moved_displacement,mean_(i: displacement>0) ||x_i'-x_i^0||,Mean displacement over vertices that actually moved,model length,lower subject to curvature improvement
+max_edge_distortion,max_(i;j in E) |l_ij'-l_ij^0|/l_ij^0,Largest accumulated relative edge-length change compared with the original mesh,ratio; 0 means unchanged,lower
+min_area_ratio,min_f A_f'/A_f^0,Smallest triangle-area ratio compared with the original mesh,ratio; 1 means unchanged,closer to 1 and greater than 0
+min_triangle_quality,min_f 4 sqrt(3) A_f'/(a_f'^2+b_f'^2+c_f'^2),Worst normalized triangle quality; equilateral is 1 and degenerate is 0,[0;1],higher
+gauss_bonnet_residual,sum_i Omega_i' - 4 pi,Difference between the computed total angle defect and the expected value for the closed genus-zero FanDisk,radians,absolute value closer to 0
